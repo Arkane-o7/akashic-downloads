@@ -1,0 +1,93 @@
+name: Assemble approved macOS preview
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: assemble-macos14-preview
+  cancel-in-progress: false
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Verify transport parts and upload the unchanged installer
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import concurrent.futures
+          import hashlib
+          import json
+          from pathlib import Path
+          import subprocess
+
+          repo = 'Arkane-o7/akashic-downloads'
+          transfer_release = 412564338
+          destination_release = 412514119
+          tag = 'macos-alpha-0.1.0-alpha.0-macos14'
+          filename = 'Akashic-Alpha-0.1.0-alpha.0-mac-arm64.dmg'
+          expected_size = 279258390
+          expected_hash = 'df5a1bd7984e8d86914b87a50e260a568f8fbff1edfc135e1a0ffc0ec60560bb'
+          part_size = 4 * 1024 * 1024
+
+          def api(path):
+              return json.loads(subprocess.check_output(['gh', 'api', path]))
+
+          destination = api(f'repos/{repo}/releases/{destination_release}')
+          assert destination['tag_name'] == tag
+          prior = next((a for a in destination['assets'] if a['name'] == filename), None)
+          if prior and prior['state'] == 'uploaded':
+              assert prior['size'] == expected_size
+              assert prior['digest'] == 'sha256:' + expected_hash
+              print('Exact installer already uploaded; no changes needed.')
+              raise SystemExit(0)
+          assert destination['draft'], 'Refuse to modify a published release.'
+          transfer = api(f'repos/{repo}/releases/{transfer_release}')
+          assert transfer['draft'], 'Transport release must stay private.'
+          assets = api(f'repos/{repo}/releases/{transfer_release}/assets?per_page=100')
+          by_name = {a['name']: a for a in assets}
+          names = [f'akashic-macos14.part-{n:03d}' for n in range(67)]
+          assert set(by_name) == set(names), 'Missing or unexpected transport parts.'
+
+          def download(name):
+              asset = by_name[name]
+              assert asset['state'] == 'uploaded'
+              assert asset['digest'].startswith('sha256:')
+              with Path(name).open('wb') as out:
+                  subprocess.run(['gh', 'api', '-H', 'Accept: application/octet-stream',
+                      f'repos/{repo}/releases/assets/{asset["id"]}'], stdout=out, check=True)
+              data = Path(name).read_bytes()
+              assert len(data) == asset['size']
+              assert hashlib.sha256(data).hexdigest() == asset['digest'][7:]
+              return name
+
+          with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+              list(pool.map(download, names))
+          full_hash = hashlib.sha256()
+          with Path(filename).open('wb') as out:
+              for n, name in enumerate(names):
+                  data = Path(name).read_bytes()
+                  assert len(data) == (part_size if n < 66 else expected_size - 66 * part_size)
+                  full_hash.update(data)
+                  out.write(data)
+          assert Path(filename).stat().st_size == expected_size
+          assert full_hash.hexdigest() == expected_hash
+          print(f'Assembled {expected_size} bytes; SHA-256 {expected_hash}')
+          if prior:
+              assert prior['state'] == 'starter', 'Refuse to replace an unexpected asset.'
+              subprocess.run(['gh', 'api', '--method', 'DELETE',
+                  f'repos/{repo}/releases/assets/{prior["id"]}'], check=True)
+          subprocess.run(['gh', 'release', 'upload', tag, '--repo', repo, filename], check=True)
+          final_assets = api(f'repos/{repo}/releases/{destination_release}/assets')
+          final = next(a for a in final_assets if a['name'] == filename)
+          assert final['state'] == 'uploaded'
+          assert final['size'] == expected_size
+          assert final['digest'] == 'sha256:' + expected_hash
+          print('GitHub server digest matches the approved local installer. Release remains draft.')
+          PY
