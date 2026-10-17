@@ -1,6 +1,6 @@
 # Akashic downloads
 
-Installers and installation notes for [Akashic](https://akashic-jet.vercel.app/), a personal AI desktop app.
+Installers and installation notes for [Akashic](https://getakashic.web.app/), a personal AI desktop app.
 
 Use the website or the [Releases page](https://github.com/Arkane-o7/akashic-downloads/releases) to find downloads. Each release includes installation notes and a SHA-256 checksum.
 
